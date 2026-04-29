@@ -1,0 +1,210 @@
+#!/usr/bin/env node
+
+const fs = require("node:fs")
+const { spawnSync } = require("node:child_process")
+
+const args = process.argv.slice(2)
+
+const flags = new Set(args.filter((arg) => arg.startsWith("-")))
+const words = args.filter((arg) => !arg.startsWith("-"))
+
+const help = flags.has("-h") || flags.has("--help")
+const say = flags.has("--say")
+const json = flags.has("--json")
+const count = flags.has("--count")
+const groups = flags.has("--groups")
+
+const target = words[0]
+const suffixArg = words[1]
+
+if (help || !target) {
+  printHelp()
+  process.exit(0)
+}
+
+const suffix = normalizeSuffix(suffixArg ?? guessSuffix(target))
+const input = readInput()
+
+const candidates = input.trim()
+  ? input.split(/\s+/)
+  : runLookup(`${suffix}$`)
+
+const cleaned = candidates
+  .map(normalizeWord)
+  .filter(Boolean)
+  .filter((word) => word !== target)
+  .filter((word) => word.endsWith(suffix))
+
+const unique = [...new Set(cleaned)].sort()
+
+const bucketed = unique.reduce((acc, word) => {
+  const key = rhymeBucket(word, suffix, target)
+
+  acc[key] ??= []
+  acc[key].push(word)
+
+  return acc
+}, {})
+
+const orderedBuckets = Object.entries(bucketed)
+  .sort(([a], [b]) => a.localeCompare(b))
+  .reduce((acc, [key, value]) => {
+    acc[key] = value
+    return acc
+  }, {})
+
+if (json) {
+  console.log(JSON.stringify(orderedBuckets, null, 2))
+  process.exit(0)
+}
+
+if (count) {
+  Object.entries(orderedBuckets)
+    .map(([key, list]) => [key, list.length])
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .forEach(([key, total]) => {
+      console.log(`${total}\t${key}`)
+    })
+
+  process.exit(0)
+}
+
+if (groups) {
+  Object.entries(orderedBuckets).forEach(([key, list]) => {
+    console.log(`${key}`)
+    list.forEach((word) => console.log(`  ${word}`))
+  })
+
+  process.exit(0)
+}
+
+const output = Object.entries(orderedBuckets)
+  .filter(([key]) => !key.endsWith("_EXCEPTION"))
+  .flatMap(([, list]) => list)
+
+if (say) {
+  spawnSync("say", [output.join(" ")], {
+    stdio: "inherit",
+  })
+
+  process.exit(0)
+}
+
+console.log(output.join("\n"))
+
+function readInput() {
+  if (process.stdin.isTTY) return ""
+  return fs.readFileSync(0, "utf8")
+}
+
+function runLookup(pattern) {
+  const result = spawnSync("lookup", [pattern], {
+    encoding: "utf8",
+  })
+
+  if (result.error) {
+    console.error(result.error.message)
+    process.exit(1)
+  }
+
+  if (result.status !== 0 && !result.stdout.trim()) {
+    console.error(result.stderr || `lookup failed: ${pattern}`)
+    process.exit(result.status || 1)
+  }
+
+  return result.stdout.split(/\s+/)
+}
+
+function normalizeWord(word) {
+  return String(word)
+    .toLowerCase()
+    .replace(/\(\d+\)$/g, "")
+    .replace(/'s$/g, "")
+    .replace(/s'$/g, "s")
+    .replace(/[^a-z']/g, "")
+}
+
+function normalizeSuffix(suffix) {
+  return String(suffix)
+    .toLowerCase()
+    .replace(/^\^/, "")
+    .replace(/\$$/, "")
+    .replace(/[^a-z']/g, "")
+}
+
+function guessSuffix(word) {
+  const clean = normalizeWord(word)
+
+  if (clean.endsWith("ize")) return "ize"
+  if (clean.endsWith("ise")) return "ise"
+  if (clean.endsWith("ow")) return "ow"
+  if (clean.endsWith("ight")) return "ight"
+  if (clean.endsWith("ation")) return "ation"
+  if (clean.length >= 4) return clean.slice(-3)
+  if (clean.length >= 3) return clean.slice(-2)
+
+  return clean
+}
+
+function rhymeBucket(word, suffix, target) {
+  if (suffix === "ize") {
+    if (word === "baize") return "EYZ_EXCEPTION"
+    return "AYZ"
+  }
+
+  if (suffix === "ise") {
+    return "AYZ"
+  }
+
+  if (suffix === "ow") {
+    if (/(allow|avow|bow|brow|chow|cow|dow|endow|how|meow|now|plow|pow|prow|vow|wow|yow)$/.test(word)) {
+      return "AW"
+    }
+
+    if (/(blow|flow|glow|grow|know|low|mow|row|show|slow|snow|stow|throw|tow|window|yellow)$/.test(word)) {
+      return "OH"
+    }
+
+    if (/(shallow|fallow|hallow|mallow|tallow|wallow)$/.test(word)) {
+      return "LOW"
+    }
+
+    return "OW_UNKNOWN"
+  }
+
+  if (suffix === "ight") {
+    return "ITE"
+  }
+
+  if (suffix === "ation") {
+    return "AY_SHUN"
+  }
+
+  return suffix.toUpperCase()
+}
+
+function printHelp() {
+  console.log(`rhymelord
+
+Usage:
+  ./rhymelord <word>
+  ./rhymelord <word> <suffix>
+  lookup "ize$" | ./rhymelord baptize ize
+  lookup "ow$"  | ./rhymelord wow ow
+
+Options:
+  --count
+  --groups
+  --json
+  --say
+  -h, --help
+
+Examples:
+  ./rhymelord baptize
+  ./rhymelord baptize ize
+  lookup "ize$" | ./rhymelord baptize ize
+  lookup "ize$" | ./rhymelord baptize ize --count
+  lookup "ow$" | ./rhymelord wow ow --groups
+  lookup "ize$" | ./rhymelord baptize ize --say
+`)
+}

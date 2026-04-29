@@ -1,0 +1,14 @@
+#!/usr/bin/env python
+
+import sys
+import pronouncing
+
+if len(sys.argv) < 2:
+    print("Usage: rhyme <word>")
+    sys.exit(1)
+
+word = sys.argv[1].lower()
+rhymes = pronouncing.rhymes(word)
+
+for rhyme in rhymes:
+    print(rhyme)
