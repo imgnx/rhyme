@@ -1,0 +1,14 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 0,
+  "workspaces": {
+    "": {
+      "dependencies": {
+        "cmudict": "^1.0.2",
+      },
+    },
+  },
+  "packages": {
+    "cmudict": ["cmudict@1.0.2", "", { "os": [ "!aix", "!android", "!openbsd", ] }, "sha512-PiJijXznZSTi69JsOWIxjHEJTK3hwV97AB4RERjFl/LfSrKIX635aRG2eLKtMO6cIZ6L/Q5wRmCIXH66OG6nRw=="],
+  }
+}

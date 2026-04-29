@@ -1,0 +1,4 @@
+#!/usr/bin/env zsh
+
+
+print -rl "${0:a:h}/bin/"* | xargs -I{} cp "{}" $HOME/.local/bin/

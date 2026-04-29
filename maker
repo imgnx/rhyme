@@ -1,0 +1,599 @@
+#!/usr/bin/env python3
+
+import argparse
+import os
+import random
+import re
+import sys
+from collections import Counter, defaultdict
+from pathlib import Path
+
+try:
+    import pronouncing
+except ModuleNotFoundError:
+    venv_python = Path(__file__).resolve().parent / ".venv" / "bin" / "python"
+    if venv_python.exists() and Path(sys.executable) != venv_python:
+        os.execv(venv_python, [str(venv_python), __file__, *sys.argv[1:]])
+    raise
+
+
+DEFAULT_DEPTH = "2-3"
+SCHEME_RE = re.compile(r"^[a-z]+$", re.IGNORECASE)
+WORD_RE = re.compile(r"^[a-z][a-z'-]*[a-z]$")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Make random words that follow an exact phonetic rhyme scheme."
+    )
+    parser.add_argument("scheme", nargs="?", help="Rhyme scheme, such as AABB or ABAB.")
+    parser.add_argument(
+        "-s",
+        "--sets",
+        type=int,
+        default=None,
+        help="How many random sets to print.",
+    )
+    parser.add_argument(
+        "-d",
+        "--depth",
+        default=None,
+        help="Exact rhyming-part phoneme count: 2, 3, 2-3, or any. Default: 2-3.",
+    )
+    parser.add_argument(
+        "-l",
+        "--length",
+        default=None,
+        help="Word length filter: 2, 3, 2-3, or any. Default: any.",
+    )
+    parser.add_argument(
+        "-e",
+        "--example",
+        action="append",
+        default=[],
+        metavar="WORD",
+        help="Example word for a rhyme sound. Can be repeated.",
+    )
+    parser.add_argument(
+        "--examples",
+        default=None,
+        help="Example words for rhyme sounds, such as 'time climb day play'.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Seed the random generator for repeatable output.",
+    )
+    parser.add_argument(
+        "--show-keys",
+        action="store_true",
+        help="Print the exact rhyme key chosen for each scheme letter.",
+    )
+    parser.add_argument(
+        "--max-combinations",
+        action="store_true",
+        help="Print the maximum number of non-repeating outputs and exit.",
+    )
+
+    args = parser.parse_args()
+
+    if args.seed is not None:
+        random.seed(args.seed)
+
+    if args.scheme is None and sys.stdin.isatty():
+        args.scheme = ask("Rhyme scheme (example: AABB or ABAB)")
+        examples = ask(
+            "Example words for rhyme sounds (blank for random)",
+            required=False,
+        )
+        if examples:
+            args.examples = examples
+        args.sets = parse_int(
+            ask("How many sets? (blank for 1)", required=False) or "1",
+            "sets",
+        )
+        args.depth = (
+            ask(
+                "Rhyme depth in phonemes: 2, 3, 2-3, or any (blank for 2-3)",
+                required=False,
+            )
+            or DEFAULT_DEPTH
+        )
+        args.length = (
+            ask("Word length: 2, 3, 2-3, or any (blank for any)", required=False)
+            or "any"
+        )
+    elif args.scheme is None:
+        parser.error("scheme is required outside interactive mode")
+
+    scheme = normalize_scheme(args.scheme)
+    sets = args.sets if args.sets is not None else 1
+    depth_filter = parse_range(args.depth or DEFAULT_DEPTH, "depth")
+    length_filter = parse_range(args.length or "any", "length")
+    example_map = parse_example_specs(args.example, args.examples, scheme)
+    fixed_keys = resolve_example_keys(example_map, interactive=sys.stdin.isatty())
+    duplicate_fixed_keys = [
+        key for key, count in Counter(fixed_keys.values()).items() if count > 1
+    ]
+
+    if duplicate_fixed_keys:
+        raise SystemExit(
+            "Different scheme letters cannot use the same phonetic rhyme sound: "
+            + ", ".join(duplicate_fixed_keys)
+        )
+
+    if sets < 1:
+        raise SystemExit("sets must be at least 1")
+
+    buckets = build_buckets(depth_filter, length_filter, set(fixed_keys.values()))
+    required_counts = Counter(scheme)
+
+    if len(buckets) < len(required_counts):
+        raise SystemExit(
+            "Not enough exact rhyme groups for that scheme and filter. "
+            "Try --depth any or --length any."
+        )
+
+    if args.max_combinations:
+        print(count_possible_combinations(scheme, required_counts, buckets, fixed_keys))
+        return
+
+    max_combinations = None
+
+    if sets > 1:
+        max_combinations = count_possible_combinations(
+            scheme,
+            required_counts,
+            buckets,
+            fixed_keys,
+        )
+
+    if max_combinations is not None and sets > max_combinations:
+        raise SystemExit(
+            f"sets cannot exceed {max_combinations} without repeating "
+            "for that scheme and filter"
+        )
+
+    seen_outputs = set()
+
+    for _ in range(sets):
+        for _attempt in range(1000):
+            words, keys = make_scheme(scheme, required_counts, buckets, fixed_keys)
+            output_key = tuple(words)
+
+            if output_key not in seen_outputs:
+                seen_outputs.add(output_key)
+                break
+        else:
+            message = "Could not find another non-repeating output."
+
+            if max_combinations is not None:
+                message += f" Maximum possible outputs: {max_combinations}"
+
+            raise SystemExit(message)
+
+        print(" ".join(words))
+
+        if args.show_keys:
+            for letter in sorted(keys):
+                print(f"  {letter}: {keys[letter]}")
+
+
+def ask(label, required=True):
+    while True:
+        value = input(f"{label}: ").strip()
+
+        if value or not required:
+            return value
+
+        print("That value is required.", file=sys.stderr)
+
+
+def normalize_scheme(value):
+    scheme = re.sub(r"\s+", "", value).upper()
+
+    if not scheme or not SCHEME_RE.fullmatch(scheme):
+        raise SystemExit("scheme must contain only letters, such as AABB or ABAB")
+
+    return scheme
+
+
+def parse_int(value, label):
+    try:
+        return int(value)
+    except ValueError as error:
+        raise SystemExit(f"{label} must be a number") from error
+
+
+def parse_range(value, label):
+    clean = str(value).strip().lower()
+
+    if clean in {"", "any", "all", "*"}:
+        return None
+
+    if re.fullmatch(r"\d+", clean):
+        number = int(clean)
+        return number, number
+
+    match = re.fullmatch(r"(\d+)\s*-\s*(\d+)", clean)
+
+    if not match:
+        raise SystemExit(f"{label} must be 2, 3, 2-3, or any")
+
+    low, high = int(match.group(1)), int(match.group(2))
+
+    if low > high:
+        low, high = high, low
+
+    return low, high
+
+
+def parse_example_specs(example_specs, examples_value, scheme):
+    specs = list(example_specs)
+
+    if examples_value:
+        specs.append(examples_value)
+
+    if not specs:
+        return {}
+
+    if any("=" in spec for spec in specs):
+        return parse_letter_example_specs(specs, scheme)
+
+    return parse_plain_example_specs(specs, scheme)
+
+
+def parse_plain_example_specs(specs, scheme):
+    scheme_letters = ordered_scheme_letters(scheme)
+    example_map = defaultdict(list)
+    seen_keys = set()
+    letter_index = 0
+
+    for spec in specs:
+        for word in split_words(spec):
+            if letter_index >= len(scheme_letters):
+                return dict(example_map)
+
+            try:
+                key = resolve_word_key(word)
+            except ValueError:
+                raise SystemExit(f"example {word!r} is not a valid word") from None
+            except LookupError:
+                clean_word = normalize_word(word)
+                raise SystemExit(
+                    f"No pronunciation found for example: {clean_word}"
+                ) from None
+
+            if key in seen_keys:
+                continue
+
+            letter = scheme_letters[letter_index]
+            example_map[letter].append(word)
+            seen_keys.add(key)
+            letter_index += 1
+
+    return dict(example_map)
+
+
+def parse_letter_example_specs(specs, scheme):
+    example_map = defaultdict(list)
+
+    for spec in specs:
+        for assignment in split_assignments(spec):
+            if "=" not in assignment:
+                raise SystemExit(
+                    "mixed example formats are not supported; enter plain words"
+                )
+
+            raw_letter, raw_words = assignment.split("=", 1)
+            letter = raw_letter.strip().upper()
+
+            if len(letter) != 1 or letter not in scheme:
+                raise SystemExit(f"example letter {letter!r} is not in the scheme")
+
+            words = split_words(raw_words)
+
+            if not words:
+                raise SystemExit(f"example {letter}= needs at least one word")
+
+            example_map[letter].extend(words)
+
+    return dict(example_map)
+
+
+def ordered_scheme_letters(scheme):
+    letters = []
+
+    for letter in scheme:
+        if letter not in letters:
+            letters.append(letter)
+
+    return letters
+
+
+def split_assignments(value):
+    text = str(value).strip()
+
+    if not text:
+        return []
+
+    return [part.strip() for part in re.split(r"\s*;\s*", text) if part.strip()]
+
+
+def split_words(value):
+    return [word for word in re.split(r"[\s,]+", str(value).strip()) if word]
+
+
+def resolve_example_keys(example_map, interactive=False):
+    return {
+        letter: resolve_example_key(letter, words, interactive)
+        for letter, words in example_map.items()
+    }
+
+
+def resolve_example_key(letter, words, interactive):
+    candidates = defaultdict(set)
+    missing_words = []
+
+    for word in words:
+        try:
+            word_keys = resolve_word_keys(word)
+        except ValueError:
+            raise SystemExit(f"{letter} example {word!r} is not a valid word") from None
+        except LookupError:
+            clean_word = normalize_word(word)
+            missing_words.append(clean_word)
+            continue
+
+        clean_word = normalize_word(word)
+        for key in word_keys:
+            candidates[key].add(clean_word)
+
+    if missing_words:
+        raise SystemExit(
+            f"No pronunciation found for {letter} example(s): "
+            + ", ".join(sorted(missing_words))
+        )
+
+    if not candidates:
+        raise SystemExit(f"No phonetic rhyme sound found for {letter} examples")
+
+    choices = sorted(
+        candidates.items(),
+        key=lambda item: (-len(item[1]), item[0]),
+    )
+
+    if len(choices) == 1 or len(choices[0][1]) == len(set(words)):
+        return choices[0][0]
+
+    if not interactive:
+        raise SystemExit(
+            f"{letter} examples do not share one phonetic rhyme sound. "
+            "Use examples that rhyme, or pass one example word."
+        )
+
+    print(f"\n{letter} phonetic sounds from examples:", file=sys.stderr)
+    for index, (key, matched_words) in enumerate(choices, start=1):
+        words_text = ", ".join(sorted(matched_words))
+        print(f"  {index}. {key} ({words_text})", file=sys.stderr)
+
+    while True:
+        answer = input(f"Choose {letter} sound [1]: ").strip()
+
+        if not answer:
+            return choices[0][0]
+
+        try:
+            index = int(answer)
+        except ValueError:
+            print("Choose a number from the list.", file=sys.stderr)
+            continue
+
+        if 1 <= index <= len(choices):
+            return choices[index - 1][0]
+
+        print("Choose a number from the list.", file=sys.stderr)
+
+
+def resolve_word_key(word):
+    return resolve_word_keys(word)[0]
+
+
+def resolve_word_keys(word):
+    clean_word = normalize_word(word)
+
+    if not clean_word:
+        raise ValueError(word)
+
+    phones = pronouncing.phones_for_word(clean_word)
+
+    if not phones:
+        raise LookupError(clean_word)
+
+    keys = []
+    for phone_string in phones:
+        key = pronouncing.rhyming_part(phone_string)
+        if key and key not in keys:
+            keys.append(key)
+
+    if not keys:
+        raise LookupError(clean_word)
+
+    return keys
+
+
+def build_buckets(depth_filter, length_filter, forced_keys=None):
+    buckets = defaultdict(set)
+    forced_keys = forced_keys or set()
+
+    for raw_word, phones in pronouncing.cmudict.entries():
+        word = normalize_word(raw_word)
+
+        if not word:
+            continue
+
+        if length_filter and not in_range(len(word), length_filter):
+            continue
+
+        key = pronouncing.rhyming_part(" ".join(phones))
+
+        if not key:
+            continue
+
+        if (
+            depth_filter
+            and key not in forced_keys
+            and not in_range(len(key.split()), depth_filter)
+        ):
+            continue
+
+        buckets[key].add(word)
+
+    return {key: sorted(words) for key, words in buckets.items()}
+
+
+def normalize_word(word):
+    clean = re.sub(r"\(\d+\)$", "", word.lower())
+    clean = clean.replace("_", "-")
+
+    if not WORD_RE.fullmatch(clean):
+        return None
+
+    return clean
+
+
+def in_range(value, bounds):
+    low, high = bounds
+    return low <= value <= high
+
+
+def make_scheme(scheme, required_counts, buckets, fixed_keys=None):
+    fixed_keys = fixed_keys or {}
+    available_keys = [key for key in buckets if key not in set(fixed_keys.values())]
+    random.shuffle(available_keys)
+
+    chosen_keys = {}
+    chosen_words = {}
+
+    for letter in sorted(required_counts, key=lambda item: (-required_counts[item], item)):
+        if letter in fixed_keys:
+            key = fixed_keys[letter]
+        elif available_keys:
+            eligible_keys = [
+                candidate
+                for candidate in available_keys
+                if len(buckets[candidate]) >= required_counts[letter]
+            ]
+
+            if not eligible_keys:
+                raise SystemExit(
+                    "Not enough exact rhyme groups for that scheme and filter. "
+                    "Try --depth any or --length any."
+                )
+
+            key = eligible_keys[0]
+            available_keys.remove(key)
+        else:
+            raise SystemExit("Ran out of exact rhyme groups.")
+
+        if key not in buckets:
+            raise SystemExit(
+                f"No words found for {letter} phonetic rhyme sound: {key}"
+            )
+
+        if len(buckets[key]) < required_counts[letter]:
+            raise SystemExit(
+                f"Not enough words for {letter} phonetic rhyme sound: {key}"
+            )
+
+        chosen_keys[letter] = key
+        chosen_words[letter] = random.sample(buckets[key], required_counts[letter])
+
+    indexes = defaultdict(int)
+    output = []
+
+    for letter in scheme:
+        index = indexes[letter]
+        output.append(chosen_words[letter][index])
+        indexes[letter] += 1
+
+    return output, chosen_keys
+
+
+def count_possible_combinations(scheme, required_counts, buckets, fixed_keys=None):
+    letters = ordered_scheme_letters(scheme)
+    fixed_keys = fixed_keys or {}
+    fixed_key_values = set(fixed_keys.values())
+    fixed_multiplier = 1
+    remaining_letters = []
+
+    for letter in letters:
+        if letter not in fixed_keys:
+            remaining_letters.append(letter)
+            continue
+
+        key = fixed_keys[letter]
+
+        if key not in buckets or len(buckets[key]) < required_counts[letter]:
+            return 0
+
+        fixed_multiplier *= count_ordered_samples(
+            len(buckets[key]),
+            required_counts[letter],
+        )
+
+    if not remaining_letters:
+        return fixed_multiplier
+
+    if len(remaining_letters) > 16:
+        raise SystemExit(
+            "Too many scheme letters to count combinations exactly in the CLI."
+        )
+
+    weights_by_key = []
+    for key, words in buckets.items():
+        if key in fixed_key_values:
+            continue
+
+        weights_by_key.append(
+            [
+                count_ordered_samples(len(words), required_counts[letter])
+                for letter in remaining_letters
+            ]
+        )
+
+    full_mask = (1 << len(remaining_letters)) - 1
+    dp = [0] * (full_mask + 1)
+    dp[0] = fixed_multiplier
+
+    for weights in weights_by_key:
+        next_dp = dp[:]
+
+        for mask, total in enumerate(dp):
+            if not total:
+                continue
+
+            for index, weight in enumerate(weights):
+                if weight and not mask & (1 << index):
+                    next_dp[mask | (1 << index)] += total * weight
+
+        dp = next_dp
+
+    return dp[full_mask]
+
+
+def count_ordered_samples(total, count):
+    if total < count:
+        return 0
+
+    result = 1
+
+    for value in range(total, total - count, -1):
+        result *= value
+
+    return result
+
+
+if __name__ == "__main__":
+    main()
