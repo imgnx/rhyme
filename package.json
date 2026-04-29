@@ -1,0 +1,25 @@
+{
+  "dependencies": {
+    "cmudict": "^1.0.2"
+  },
+  "name": "rhyme",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "devDependencies": {},
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/imgnx/rhyme.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/imgnx/rhyme/issues"
+  },
+  "homepage": "https://github.com/imgnx/rhyme#readme"
+}
