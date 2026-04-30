@@ -1,1 +1,8 @@
-.breadcrumb
+node_modules
+./.*
+./.*/**/
+/.*
+/.*/**/
+!.git*
+
+
